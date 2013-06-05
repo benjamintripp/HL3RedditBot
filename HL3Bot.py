@@ -51,6 +51,7 @@ def main():
 
 	           		#post comment
 	           		submission.add_comment(''.join(comment))
+	           		already_done.append(submission.id)
 	    time.sleep(1800)
 
 
