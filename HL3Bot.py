@@ -1,59 +1,93 @@
 from __future__ import division #by default older versions force integer division, so importing the correct division
 import re 
-import itertools 
 import time
 import praw
 import random
+import pymysql
+
+
 
 #Main Fuction 
 #Connects to reddit to get posts, calls functions to determine HL3, and posts comment
-#TODO: Connect to database instead of loop
 def main():
 
-  #Login to reddit
+	#connect to the database
+	db = pymysql.connect(host='hostaddress', port=3306, user='username', passwd='password', db='databasename')
+	cursor = db.cursor()
+
+	#Login to reddit
 	r = praw.Reddit('HL3 confimred bot'
 	                'Url: http:/www.bentheo.com')
-	r.login('UserName','Password')
+	r.login('redditusername','password')
 
 	#List of posts already commented on
 	already_done = []
 
 	#Main loop
-	while True:
+	if True:
 		#Set subreddit to browse
-	    subreddit = r.get_subreddit('hl3confirmedbot')
+	    subreddit = r.get_subreddit('gaming')
 
 	    #loop through each post in top posts
-	    for submission in subreddit.get_hot(limit=20):
+	    for submission in subreddit.get_hot(limit=30):
 	    	#Get post title
 	        op_text = submission.title.lower()
 	        #Extract all numbers from post title
 	        numonly = re.sub("[^0-9]", "", op_text)
 
 	        #If the post hasn't been commented on already and contains numbers then  process
-	        if submission.id not in already_done and len(numonly) > 0:
-	        	#get a formula that equals 3 out of numbers in title
-	           	hl3f = HL3Forumula(numonly)
-	           	#if a formula exist then process
-	           	if len(hl3f) > 0:
-	      			comment = []
-	      			#Format post title to highlight number
-	           		comment.append('**Post Title:** "' + GetRedditTitle(op_text) + '"')
+	        #Ignore the case when there is only 1 number, since the only time that matters is when it is 3, which is a boring post
+	        #limited the input to 7 characters, since it slows down exponentially
+	        if  len(numonly) > 1 and len(numonly) < 8:
 
-	           		#List out all numbers with some explanation
-	           		if re.sub("[^0-9]", "", hl3f) == numonly:
-	           			comment.append("\n\nExtract the numbers from this post title and you get: " + numonly + '\n\n')
-	           		else:
-	           			comment.append("\n\nExtract and rearrange the numbers from the post title and you get: " + re.sub("[^0-9]", "", hl3f) + '\n\n')
-	           		
-	           		#Convert the formula to text for the comment
-	           		comment.extend(FormulaToText(hl3f))
+	        	#check if this post has already been commented on
+	        	query = "SELECT * FROM hl3bot WHERE PostID = \'" +  submission.id + "\'"
+	        	found = cursor.execute(query)
+	        	
+	        	if not found:
+		        	#get a formula that equals 3 out of numbers in title
+		           	hl3f = HL3Forumula(numonly)
+		           	#if a formula exist then process
+		           	if len(hl3f) > 0:
+		      			comment = []
+		      			#Format post title to highlight number
+		           		comment.append('**Post Title:** "' + GetRedditTitle(op_text) + '"')
 
-	           		#post comment
-	           		submission.add_comment(''.join(comment))
-	           		already_done.append(submission.id)
-	    time.sleep(1800)
+		           		#List out all numbers with some explanation
+		           		if re.sub("[^0-9]", "", hl3f) == numonly:
+		           			comment.append("\n\nExtract the numbers from this post title and you get: " + numonly + '\n\n')
+		           		else:
+		           			comment.append("\n\nExtract and rearrange the numbers from the post title and you get: " + re.sub("[^0-9]", "", hl3f) + '\n\n')
+		           		
+		           		#Convert the formula to text for the comment
+		           		comment.extend(FormulaToText(hl3f))
 
+		           		#post comment
+		           		submission.add_comment(''.join(comment))
+
+		     			#add to database
+		           		cursor.execute("""INSERT INTO hl3bot VALUES(%s)""", (submission.id))
+
+
+#This is the implementation from itertools
+#http://docs.python.org/2/library/itertools.html
+#my server host doens't have this module installed so I had to implement
+def combinations_with_replacement(iterable, r):
+    # combinations_with_replacement('ABC', 2) --> AA AB AC BB BC CC
+    pool = tuple(iterable)
+    n = len(pool)
+    if not n and r:
+        return
+    indices = [0] * r
+    yield tuple(pool[i] for i in indices)
+    while True:
+        for i in reversed(range(r)):
+            if indices[i] != n - 1:
+                break
+        else:
+            return
+        indices[i:] = [indices[i] + 1] * (r - i)
+        yield tuple(pool[i] for i in indices)
 
 #Generates all permationts of input string
 def all_perms(str):
@@ -80,7 +114,7 @@ def HL3Forumula(numlist):
 	if len(digits) > 0:
 		#get all combinatinos of operators
 		#the operators basically alternate with the numbers, so each string of operators needs to be one less than the number string
-		operatorcombos =  list(itertools.combinations_with_replacement(operators,len(digits)-1))
+		operatorcombos =  list(combinations_with_replacement(operators,len(digits)-1))
 		
 		#Combine the number strings with the operator strings and evaluate
 		for n in numbercombos:
@@ -91,12 +125,34 @@ def HL3Forumula(numlist):
 						word += n[i]
 					else:
 						word += n[i] +  o[i] 
-				#if the result of the formula found is 3, then store the result
-				if float(eval(word)) == 3: results.append(word)
+				#if the result of the formula found is 3, then store the 
+				rword = 0
+				#don't process cases where division by 0
+				#previously was just letting this case error out and ignoring the error
+				if word.find("/0") == -1:
+					try:
+						rword = float(eval(word))
+					except ZeroDivisionError:
+						pass
+					if rword  == 3: results.append(word)
 	
 	#return a random result
 	if len(results) > 0:
-		return random.choice(results)
+			#prioritize the results based on feedback on reddit
+			#cases where their is 0 times a number of 0 divided by a number are low
+			#cases where the numbers are in the original order of the post title are high
+			#everything else is medium 
+	        low = [x for x in results if  x.find('*0') > -1 or x.find('0*') > -1 or x.find('0/') > -1]
+	        high = [x for x in results if re.sub("[^0-9]", "", x) == numlist and x not in low]
+	        med = [x for x in results if  x not in high and x not in low]
+	        if len(high) > 0:
+	            return random.choice(high)
+	        elif len(med) > 0:
+	            return random.choice(med)
+	        elif len(low) > 0:
+	            return random.choice(low)
+	        else:
+	            return []
 	else:
 		return []
 
